@@ -1,13 +1,18 @@
-#====================================================#
-# Long term outcomes in type 2 myocardial infarction #
-#====================================================#
+                                        #==============================#
+                                         Long term outcomes in type 2 MI
+                                        #==============================#
 
-16.10.2017
-Andrew R Chapman
-University of Edinburgh
-a.r.chapman@ed.ac.uk
+                                                Andrew R Chapman
+                                            University of Edinburgh
+                                             a.r.chapman@ed.ac.uk
+                                                   19.05.2017
+                                           Updated 15.10.2017
 
-# load packages
+                        R code supplied to provide an overview of key steps in analysis
+              Code has been edited for readability and re-ordered as per manuscript and supplement
+               Where repeated analysis steps have taken place, only an example is shown for brevity
+
+#Require the following packages
 library(tableone)
 library(caret)
 library(reshape2)
@@ -428,6 +433,7 @@ combine.df <- function(x, y) {
 
 ##################################################################
 
+# setwd ("~/")
 # load files
 
 dat <- read.spss ("v6longterm.sav", to.data.frame=T, trim.factor.names=T)
