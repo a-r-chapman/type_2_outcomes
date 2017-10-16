@@ -1,0 +1,1028 @@
+#====================================================#
+# Long term outcomes in type 2 myocardial infarction #
+#====================================================#
+
+16.10.2017
+Andrew R Chapman
+University of Edinburgh
+a.r.chapman@ed.ac.uk
+
+# load packages
+library(tableone)
+library(caret)
+library(reshape2)
+library(tidyr)
+library(dplyr)
+library(binom)
+library(survival)
+library(grid)
+library(survMisc)
+library(scales)
+library(foreign)
+library(Hmisc)
+library(ggplot2)
+library(gridExtra)
+library(pspline)
+library(broom)
+library(gtable)
+library(MatchIt)
+library(sandwich)
+
+
+###================
+### load functions
+###================
+
+# multiplot function
+
+# plot on one page
+
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+        require(grid)
+        
+        # Make a list from the ... arguments and plotlist
+        plots <- c(list(...), plotlist)
+        
+        numPlots = length(plots)
+        
+        # If layout is NULL, then use 'cols' to determine layout
+        if (is.null(layout)) {
+                # Make the panel
+                # ncol: Number of columns of plots
+                # nrow: Number of rows needed, calculated from # of cols
+                layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                                 ncol = cols, nrow = ceiling(numPlots/cols))
+        }
+        
+        if (numPlots==1) {
+                print(plots[[1]])
+                
+        } else {
+                # Set up the page
+                grid.newpage()
+                pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+                
+                # Make each plot, in the correct location
+                for (i in 1:numPlots) {
+                        # Get the i,j matrix positions of the regions that contain this subplot
+                        matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+                        
+                        print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                                        layout.pos.col = matchidx$col))
+                }
+        }
+}
+
+
+
+# load survival functions
+
+
+createSurvivalFrame <- function(f.survfit){ 
+        # initialise frame variable
+        f.frame <- NULL
+        
+        # check if more then one strata
+        if(length(names(f.survfit$strata)) == 0){
+                
+                # create data.frame with data from survfit
+                f.frame <- data.frame(time=f.survfit$time, n.risk=f.survfit$n.risk, n.event=f.survfit$n.event, n.censor = f.survfit $n.censor, surv=f.survfit$surv, upper=f.survfit$upper, lower=f.survfit$lower)
+                # create first two rows (start at 1)
+                f.start <- data.frame(time=c(0, f.frame$time[1]), n.risk=c(f.survfit$n, f.survfit$n), n.event=c(0,0), n.censor=c(0,0), surv=c(1,1), upper=c(1,1), lower=c(1,1))
+                # add first row to dataset
+                f.frame <- rbind(f.start, f.frame)
+                # remove temporary data
+                rm(f.start) 
+        }
+        else {
+                
+                # create vector for strata identification
+                f.strata <- NULL
+                for(f.i in 1:length(f.survfit$strata)){
+                        # add vector for one strata according to number of rows of strata
+                        f.strata <- c(f.strata, rep(names(f.survfit$strata)[f.i], f.survfit$strata[f.i])) }
+                # create data.frame with data from survfit (create column for strata)
+                f.frame <- data.frame(time=f.survfit$time, n.risk=f.survfit$n.risk, n.event=f.survfit$n.event, n.censor = f.survfit $n.censor, surv=f.survfit$surv, upper=f.survfit$upper, lower=f.survfit$lower, strata=factor(f.strata))
+                # remove temporary data
+                rm(f.strata)
+                # create first two rows (start at 1) for each strata
+                for(f.i in 1:length(f.survfit$strata)){
+                        # take only subset for this strata from data
+                        f.subset <- subset(f.frame, strata==names(f.survfit$strata)[f.i])
+                        # create first two rows (time: 0, time of first event)
+                        
+                        f.start <- data.frame(time=c(0, f.subset$time[1]), n.risk=rep(f.survfit[f.i]$n, 2), n.event=c(0,0), n.censor=c(0,0), surv=c(1,1), upper=c(1,1), lower=c(1,1), strata=rep(names(f.survfit$strata)[f.i], 2))
+                        # add first two rows to dataset
+                        f.frame <- rbind(f.start, f.frame)
+                        # remove temporary data
+                        rm(f.start, f.subset) }
+                # reorder data
+                f.frame <- f.frame[order(f.frame$strata, f.frame$time), ]
+                # rename row.names
+                rownames(f.frame) <- NULL }
+        # return frame
+        return(f.frame) }
+
+# define custom function to draw kaplan-meier curve with ggplot
+##FOR DASHED LINE ADD BELOW
+qplot_survival <- function(f.frame, f.CI="default", f.shape=3){
+        # use different plotting commands dependig whether or not strata's are given 
+        if("strata" %in% names(f.frame) == FALSE){
+                # confidence intervals are drawn if not specified otherwise
+                if(f.CI=="default" | f.CI==TRUE ){
+                        # create plot with 4 layers (first 3 layers only events, last layer only censored)
+                        # hint: censoring data for multiple censoring events at timepoint are overplotted
+                        # (unlike in plot.survfit in survival package)
+                        ggplot(data=f.frame) + geom_step(aes(x=time, y=1-surv), direction="hv") + geom_step(aes(x=time,y=lower), directions="hv", linetype=2) + geom_step(aes(x=time,y=upper), direction="hv", linetype=2) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv), shape=f.shape)
+                } 
+                else {
+                        # create plot without confidence intervalls
+                        ggplot(data=f.frame) + geom_step(aes(x=time, y=1-surv), direction="hv", size=5) + 
+                                geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv),size=5, shape=f.shape)
+                }
+        }
+        else {
+                if(f.CI=="default" | f.CI==FALSE){
+                        
+                        # without CI
+                        ###ADD LINETYPE=2 -------------------------------------------------------------------------------------------------here
+                        ggplot(data=f.frame, aes(group=strata, colour=strata)) + geom_step(aes(x=time, y=1-surv), direction="hv", size=0.75) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv), shape=f.shape, linetype=2)
+                } 
+                else {
+                        
+                        # with CI (hint: use alpha for CI)
+                        
+                        ggplot(data=f.frame, aes(colour=strata, group=strata)) + geom_step(aes(x=time, y=1-surv), direction="hv") + geom_step(aes(x=time, y=lower), directions="hv", linetype=2, alpha=0.5) + geom_step(aes(x=time,y=upper), direction="hv", linetype=2, alpha=0.5) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv), shape=f.shape)
+                        
+                } 
+        }
+}
+
+qplot_survival2 <- function(f.frame, f.CI="default", f.shape=3){
+        # use different plotting commands dependig whether or not strata's are given 
+        if("strata" %in% names(f.frame) == FALSE){
+                # confidence intervals are drawn if not specified otherwise
+                if(f.CI=="default" | f.CI==TRUE ){
+                        # hint: censoring data for multiple censoring events at timepoint are overplotted
+                        # (unlike in plot.survfit in survival package)
+                        ggplot(data=f.frame) + geom_step(aes(x=time, y=1-surv), direction="hv") + geom_step(aes(x=time,y=lower), directions="hv", linetype=2) + geom_step(aes(x=time,y=upper), direction="hv", linetype=2) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv), shape=f.shape)
+                } 
+                else {
+                        # create plot without confidence intervalls
+                        ggplot(data=f.frame) + geom_step(aes(x=time, y=1-surv), direction="hv", size=5) + 
+                                geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv),size=5, shape=f.shape)
+                }
+        }
+        else {
+                if(f.CI=="default" | f.CI==FALSE){
+                        
+                        # without CI
+                        ###ADD LINETYPE=2 -------------------------------------------------------------------------------------------------here
+                        ggplot(data=f.frame, aes(group=strata, colour=strata, linetype=strata)) + geom_step(aes(x=time, y=1-surv), direction="hv", size=0.75) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv), shape=f.shape)
+                } 
+                else {
+                        
+                        # with CI (hint: use alpha for CI)
+                        
+                        ggplot(data=f.frame, aes(colour=strata, group=strata)) + geom_step(aes(x=time, y=1-surv), direction="hv") + geom_step(aes(x=time, y=lower), directions="hv", linetype=2, alpha=0.5) + geom_step(aes(x=time,y=upper), direction="hv", linetype=2, alpha=0.5) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=1-surv), shape=f.shape)
+                        
+                } 
+        }
+}
+
+#KM NOT CI
+qplot_survival3 <- function(f.frame, f.CI="default", f.shape=3){
+        # use different plotting commands dependig whether or not strata's are given 
+        if("strata" %in% names(f.frame) == FALSE){
+                # confidence intervals are drawn if not specified otherwise
+                if(f.CI=="default" | f.CI==TRUE ){
+                        # create plot with 4 layers (first 3 layers only events, last layer only censored)
+                        # hint: censoring data for multiple censoring events at timepoint are overplotted
+                        # (unlike in plot.survfit in survival package)
+                        ggplot(data=f.frame) + geom_step(aes(x=time, y=surv), direction="hv") + geom_step(aes(x=time,y=lower), directions="hv", linetype=2) + geom_step(aes(x=time,y=upper), direction="hv", linetype=2) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=surv), shape=f.shape)
+                } 
+                else {
+                        # create plot without confidence intervalls
+                        ggplot(data=f.frame) + geom_step(aes(x=time, y=surv), direction="hv", size=5) + 
+                                geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=surv),size=5, shape=f.shape)
+                }
+        }
+        else {
+                if(f.CI=="default" | f.CI==FALSE){
+                        
+                        # without CI
+                        ###ADD LINETYPE=2 -------------------------------------------------------------------------------------------------here
+                        ggplot(data=f.frame, aes(group=strata, colour=strata)) + geom_step(aes(x=time, y=surv), direction="hv", size=0.75) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=surv), shape=f.shape, linetype=2)
+                } 
+                else {
+                        
+                        # with CI (hint: use alpha for CI)
+                        
+                        ggplot(data=f.frame, aes(colour=strata, group=strata)) + geom_step(aes(x=time, y=surv), direction="hv") + geom_step(aes(x=time, y=lower), directions="hv", linetype=2, alpha=0.5) + geom_step(aes(x=time,y=upper), direction="hv", linetype=2, alpha=0.5) + geom_point(data=subset(f.frame, n.censor==1), aes(x=time, y=surv), shape=f.shape)
+                        
+                } 
+        }
+}
+
+ggkm <- function(sfit,
+                 table = TRUE,
+                 returns = FALSE,
+                 xlabs = "Time",
+                 ylabs = "Survival Probability",
+                 xlims = c(0,max(sfit$time)),
+                 ylims = c(0,1),
+                 ystratalabs = NULL,
+                 ystrataname = NULL,
+                 timeby = 100,
+                 main = "Kaplan-Meier Plot",
+                 pval = TRUE,
+                 subs = NULL,
+                 ...) {
+        
+        #############
+        # libraries #
+        #############
+        
+        require(ggplot2)
+        require(survival)
+        require(gridExtra)
+        require(plyr)
+        
+        #################################
+        # sorting the use of subsetting #
+        #################################
+        
+        times <- seq(0, max(sfit$time), by = timeby)
+        
+        if(is.null(subs)){
+                subs1 <- 1:length(levels(summary(sfit)$strata))
+                subs2 <- 1:length(summary(sfit,censored=T)$strata)
+                subs3 <- 1:length(summary(sfit,times = times,extend = TRUE)$strata)
+        } else{
+                for(i in 1:length(subs)){
+                        if(i==1){
+                                ssvar <- paste("(?=.*\\b=",subs[i],sep="")
+                        }
+                        if(i==length(subs)){
+                                ssvar <- paste(ssvar,"\\b)(?=.*\\b=",subs[i],"\\b)",sep="")
+                        }
+                        if(!i %in% c(1, length(subs))){
+                                ssvar <- paste(ssvar,"\\b)(?=.*\\b=",subs[i],sep="")
+                        }
+                        if(i==1 & i==length(subs)){
+                                ssvar <- paste("(?=.*\\b=",subs[i],"\\b)",sep="")
+                        }
+                }
+                subs1 <- which(regexpr(ssvar,levels(summary(sfit)$strata), perl=T)!=-1)
+                subs2 <- which(regexpr(ssvar,summary(sfit,censored=T)$strata, perl=T)!=-1)
+                subs3 <- which(regexpr(ssvar,summary(sfit,times = times,extend = TRUE)$strata, perl=T)!=-1)
+        }
+        
+        if( !is.null(subs) ) pval <- FALSE
+        
+        ##################################
+        # data manipulation pre-plotting #
+        ##################################
+        
+        if(is.null(ystratalabs)) ystratalabs <- as.character(sub("group=*","",names(sfit$strata))) #[subs1]
+        if(is.null(ystrataname)) ystrataname <- "Strata"
+        m <- max(nchar(ystratalabs))
+        times <- seq(0, max(sfit$time), by = timeby)
+        
+        .df <- data.frame(                      # data to be used in the survival plot
+                time = sfit$time[subs2],
+                n.risk = sfit$n.risk[subs2],
+                n.event = sfit$n.event[subs2],
+                surv = sfit$surv[subs2],
+                strata = factor(summary(sfit, censored = T)$strata[subs2]),
+                upper = sfit$upper[subs2],
+                lower = sfit$lower[subs2]
+        )
+        
+        levels(.df$strata) <- ystratalabs       # final changes to data for survival plot
+        zeros <- data.frame(time = 0, surv = 1,
+                            strata = factor(ystratalabs, levels=levels(.df$strata)),
+                            upper = 1, lower = 1)
+        .df <- rbind.fill(zeros, .df)
+        d <- length(levels(.df$strata))
+        
+        ###################################
+        # specifying plot parameteres etc #
+        ###################################
+        
+        p <- ggplot( .df, aes(time, surv)) +
+                geom_step(aes(linetype = strata), size = 0.7) +
+                theme_bw() +
+                theme(axis.title.x = theme_text(vjust = 0.5)) +
+                scale_x_continuous(xlabs, breaks = times, limits = xlims) +
+                scale_y_continuous(ylabs, limits = ylims) +
+                theme(panel.grid.minor = element_blank()) +
+                theme(legend.position = c(ifelse(m < 10, .28, .35),ifelse(d < 4, .25, .35))) +    # MOVE LEGEND HERE [first is x dim, second is y dim]
+                theme(legend.key = theme_rect(colour = NA)) +
+                labs(linetype = ystrataname) +
+                theme(plot.margin = unit(c(0, 1, .5,ifelse(m < 10, 1.5, 2.5)),"lines")) +
+                theme(title = main)
+        
+        ## Create a blank plot for place-holding
+        ## .df <- data.frame()
+        blank.pic <- ggplot(.df, aes(time, surv)) +
+                geom_blank() + theme_bw() +
+                theme(axis.text.x = element_blank(),axis.text.y = element_blank(),
+                      axis.title.x = element_blank(),axis.title.y = element_blank(),
+                      axis.ticks = element_blank(),
+                      panel.grid.major = element_blank(),panel.border = element_blank())
+        
+        #####################
+        # p-value placement #
+        #####################a
+        
+        if(pval) {
+                sdiff <- survdiff(eval(sfit$call$formula), data = eval(sfit$call$data))
+                pval <- pchisq(sdiff$chisq,length(sdiff$n) - 1,lower.tail = FALSE)
+                pvaltxt <- ifelse(pval < 0.0001,"p < 0.0001",paste("p =", signif(pval, 3)))
+                p <- p + annotate("text",x = 0.6 * max(sfit$time),y = 0.1,label = pvaltxt)
+        }
+        
+        ###################################################
+        # Create table graphic to include at-risk numbers #
+        ###################################################
+        
+        if(table) {
+                risk.data <- data.frame(
+                        strata = factor(summary(sfit,times = times,extend = TRUE)$strata[subs3]),
+                        time = summary(sfit,times = times,extend = TRUE)$time[subs3],
+                        n.risk = summary(sfit,times = times,extend = TRUE)$n.risk[subs3]
+                )
+                risk.data$strata <- factor(risk.data$strata, levels=rev(levels(risk.data$strata)))
+                
+                data.table <- ggplot(risk.data,aes(x = time, y = strata, label = format(n.risk, nsmall = 0))) +
+                        #, color = strata)) +
+                        geom_text(size = 3.5) + theme_bw() +
+                        scale_y_discrete(breaks = as.character(levels(risk.data$strata)),
+                                         labels = rev(ystratalabs)) +
+                        # scale_y_discrete(#format1ter = abbreviate,
+                        # breaks = 1:3,
+                        # labels = ystratalabs) +
+                        scale_x_continuous("Numbers at risk", limits = xlims) +
+                        theme(axis.title.x = theme_text(size = 10, vjust = 1),
+                              panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                              panel.border = element_blank(),axis.text.x = element_blank(),
+                              axis.ticks = element_blank(),axis.text.y = theme_text(face = "bold",hjust = 1))
+                
+                data.table <- data.table +
+                        theme(legend.position = "none") + xlab(NULL) + ylab(NULL)
+                
+                data.table <- data.table +
+                        theme(plot.margin = unit(c(-1.5, 1, 0.1, ifelse(m < 10, 2.5, 3.5) - 0.28 * m), "lines")) # ADJUST POSITION OF TABLE FOR AT RISK
+                
+                #######################
+                # Plotting the graphs #
+                #######################
+                
+                ## p <- ggplotGrob(p)
+                ## p <- addGrob(p, textGrob(x = unit(.8, "npc"), y = unit(.25, "npc"), label = pvaltxt,
+                ## gp = gpar(fontsize = 12)))
+                grid.arrange(p, blank.pic, data.table, clip = FALSE, nrow = 3,
+                             ncol = 1, heights = unit(c(2, .1, .25),c("null", "null", "null")))
+                
+                if(returns) {
+                        a <- arrangeGrob(p, blank.pic, data.table, clip = FALSE, nrow = 3,
+                                         ncol = 1, heights = unit(c(2, .1, .25), c("null", "null", "null")))
+                        return(a)
+                }
+        } else {
+                ## p <- ggplotGrob(p)
+                ## p <- addGrob(p, textGrob(x = unit(0.5, "npc"), y = unit(0.23, "npc"),
+                ## label = pvaltxt, gp = gpar(fontsize = 12)))
+                
+                if(returns) return(p)
+        }
+}
+
+combine.df <- function(x, y) {
+        rows.x <- nrow(x)
+        rows.y <- nrow(y)
+        if (rows.x > rows.y) {
+                diff <- rows.x - rows.y
+                df.na <- matrix(NA, diff, ncol(y))
+                colnames(df.na) <- colnames(y)
+                cbind(x, rbind(y, df.na))
+        } else {
+                diff <- rows.y - rows.x
+                df.na <- matrix(NA, diff, ncol(x))
+                colnames(df.na) <- colnames(x)
+                cbind(rbind(x, df.na), y)
+        }
+}
+
+
+##################################################################
+
+# load files
+
+dat <- read.spss ("v6longterm.sav", to.data.frame=T, trim.factor.names=T)
+
+#---------------------------------------
+##Sorting data for survival analysis 
+#---------------------------------------
+#report five year survival
+dat2$five.year.death <- ifelse(dat2$all.death==1&dat2$days.to.event.or.follow.up<=1826.25,1,0)
+dat2$five.year.cv.death <- ifelse(dat2$cv.death==1&dat2$days.to.event.or.follow.up<=1826.25,1,0)
+dat2$five.year.non.cv.death <- ifelse(dat2$non.cv.death==1&dat2$days.to.event.or.follow.up<=1826.25,1,0)
+dat2$five.year.mi <- ifelse(dat2$recurrent.nonfatal.mi==1&dat2$days.to.mi.death.or.follow.up<=1826.25,1,0)
+dat2$five.year.fatalmi <- ifelse(dat2$recurrent.fatal.mi==1&dat2$days.to.mi.death.or.follow.up<=1826.25,1,0)
+dat2$five.year.hf <- ifelse(dat3$hf.readmission==1&dat3$days.to.hf.mi.death.or.follow.up<1826.25,1,0)
+dat2$five.year.mace <- ifelse(dat2$composite.mi.death==1&dat2$days.to.mi.death.or.follow.up<1826.25,1,0)
+
+#determine patient years for death or last follow up all groups
+patient.years.t1 <- (sum(dat2$days.to.event.or.follow.up[dat2$classification==1]))/365.25
+patient.years.t2 <- (sum(dat2$days.to.event.or.follow.up[dat2$classification==2]))/365.25
+patient.years.injury <- (sum(dat2$days.to.event.or.follow.up[dat2$classification==3]))/365.25
+patient.years.t2injury <- (sum(dat2$days.to.event.or.follow.up[dat2$type2.injury==1]))/365.25
+
+#determine patient years for MI/death or last follow up all groups
+patient.years.mi.t1 <- (sum(dat2$days.to.mi.death.or.follow.up[dat2$classification==1]))/365.25
+patient.years.mi.t2 <- (sum(dat2$days.to.mi.death.or.follow.up[dat2$classification==2]))/365.25
+patient.years.mi.injury <- (sum(dat2$days.to.mi.death.or.follow.up[dat2$classification==3]))/365.25
+patient.years.mi.t2.injury <- (sum(dat2$days.to.mi.death.or.follow.up[dat2$type2.injury==1]))/365.25
+
+#determine deaths for all groups
+all.death.t1 <- (sum(dat2$all.death[dat2$classification==1]))
+all.death.t2 <- (sum(dat2$all.death[dat2$classification==2]))
+all.death.injury <- (sum(dat2$all.death[dat2$classification==3]))
+all.death.t2.injury <- (sum(dat2$all.death[dat2$type2.injury==1]))
+
+#determine CV deaths for all groups
+cv.death.t1 <- (sum(dat2$cv.death[dat2$classification==1]))
+cv.death.t2 <- (sum(dat2$cv.death[dat2$classification==2]))
+cv.death.injury <- (sum(dat2$cv.death[dat2$classification==3]))
+
+#determine nonCV deaths for all groups
+non.cv.death.t1 <- (sum(dat2$non.cv.death[dat2$classification==1]))
+non.cv.death.t2 <- (sum(dat2$non.cv.death[dat2$classification==2]))
+non.cv.death.injury <- (sum(dat2$non.cv.death[dat2$classification==3]))
+
+#determine composite CV or MI for all groups
+cv.mi.death.t1 <- (sum(dat2$composite.mi.death[dat2$classification==1]))
+cv.mi.death.t2 <- (sum(dat2$composite.mi.death[dat2$classification==2]))
+cv.mi.death.injury <- (sum(dat2$composite.mi.death[dat2$classification==3]))
+
+#determine hospitalisation for T1MI for all groups
+mi.t1 <- (sum(dat2$recurrent.nonfatal.mi[dat2$classification==1]))
+mi.t2 <- (sum(dat2$recurrent.nonfatal.mi[dat2$classification==2]))
+mi.injury <- (sum(dat2$recurrent.nonfatal.mi[dat2$classification==3]))
+mi.t2.injury <- (sum(dat2$recurrent.nonfatal.mi[dat2$type2.injury==1]))
+
+#determine five year death
+t1.all.death <- (sum(dat2$five.year.death[dat2$classification==1]))
+t2.all.death <- (sum(dat2$five.year.death[dat2$classification==2]))
+injury.all.death <- (sum(dat2$five.year.death[dat2$classification==3]))
+
+
+
+t1.all.mi <- (sum(dat2$five.year.mi[dat2$classification==1]))
+t2.all.mi <- (sum(dat2$five.year.mi[dat2$classification==2]))
+injury.mi <- (sum(dat2$five.year.mi[dat2$classification==3]))
+
+#---------------------------------------
+##subset data by classification 
+#---------------------------------------
+
+dat.t1 <- subset(dat2, classification==1)
+dat.t2 <- subset(dat2, classification==2)
+dat.injury <- subset(dat2, classification==3)
+dat.t1.t2 <- subset(dat2, classification==1 | classification==2)
+dat.t2.injury <- subset(dat2, classification==2 | classification==3)
+dat.t1.injury <- subset(dat2, classification==1 | classification==3)
+
+recurrent.mi <- subset(dat2, recurrent.nonfatal.mi==1)
+recurrent.mi <- recurrent.mi[,1]
+##write.csv(recurrent.mi, file="recurrent.mi.IDs.csv")
+
+
+#------------
+## 'Landmark' Population
+#------------
+landmark.dat2 <- subset(dat2, days.to.event.or.follow.up>30) 
+
+#Table one        
+dput(names(dat2))
+
+vars <- c("DASA", "DClop", "DBblock", "DACE", "DStatin", 
+          "DNitrate", "DGTNspr", "DCCB", "DWarf")
+
+table <- CreateTableOne(vars=vars, strata=c("type2.injury"), data=landmark.dat2, includeNA = FALSE, test = TRUE, testApprox = chisq.test, argsApprox = list(correct = TRUE), testExact = fisher.test)
+
+table <- print(table, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+#write.csv(table, file = "table5.landmark.csv")
+
+
+#report five year survival for landmark population
+table(landmark.dat2$classification)
+
+table(landmark.dat2$classification, landmark.dat2$five.year.death)
+table(landmark.dat2$classification, landmark.dat2$five.year.mace)
+table(landmark.dat2$classification, landmark.dat2$five.year.mi)
+table(landmark.dat2$classification, landmark.dat2$five.year.cv.death)
+table(landmark.dat2$classification, landmark.dat2$five.year.fatalmi)
+table(landmark.dat2$classification, landmark.dat2$five.year.hf)
+table(landmark.dat2$classification, landmark.dat2$five.year.non.cv.death)
+
+
+
+#---------------------------------------
+##create tables
+#---------------------------------------
+#Table one        
+dput(names(dat2))
+dat2$HxIHD <- as.factor(dat2$HxIHD)
+dat2$HxMI <- as.factor(dat2$HxMI)
+
+vars <- c("Age","Sex","Smoker", "Exsmoker", "DM", "HTN", "Lipids", "FH", "HxIHD", "HxMI", "HxSTROKE", "HxPVD", "PrevPCI", "PrevCABG", "AASA", "AClop", "ABblock", "AACE", "AStatin", "ANitrate", "ACCB", "ANicor", "AGTNspr", "ADiur", "AWarf", "ARanitidine", "APPI", "Cholesterol", "AdmissionUrea", "AdmissionCr", "Corrected.EGFR", "AdmissionHb", "Grouptroponin")
+
+table <- CreateTableOne(vars=vars, strata=c("classification"), data=dat2, includeNA = FALSE, test = TRUE, testApprox = chisq.test, argsApprox = list(correct = TRUE), testExact = fisher.test)
+
+table <- print(table, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+##write.csv(table, file = "tableonebytype.csv")
+
+#---------------------------------------
+#determine median and IQR of troponin
+median.iqr.t1 <- quantile(dat.t1$Grouptroponin)
+median.iqr.t2 <- quantile(dat.t2$Grouptroponin)
+median.iqr.t3 <- quantile(dat.injury$Grouptroponin)
+
+# Log troponin
+dat2$Grouptroponin <- log2(dat2$Grouptroponin)
+
+
+#---------------------------------------
+## SURVIVAL ANALYSIS 
+#---------------------------------------
+####TOTAL POPULATION
+
+#relative risk estimates – glm, log link, robust errors
+rr.est <- function(m1,name){
+        cov.m1 <- vcovHC(m1, type="HC0")
+        std.err <- sqrt(diag(cov.m1))
+        r.est <- cbind(Estimate= exp(coef(m1)), "Robust SE" = std.err,
+                       "Pr(>|z|)" = 2 * pnorm(abs(coef(m1)/std.err), lower.tail=FALSE),
+                       LL = exp(coef(m1) - 1.96 * std.err),
+                       UL = exp(coef(m1) + 1.96 * std.err))
+        r.est <- cbind(r.est[2,1], r.est[2,4], r.est[2,5])
+        r.est <- round(r.est, digits=2)
+        r.est <- data.frame(paste(r.est[1,1],"(",r.est[1,2],"-",r.est[1,3],")"))
+        rownames(r.est) <- name
+        colnames(r.est) <- "RR (95 %CI)"
+        print(r.est)
+}
+
+# DEATH Index type 2 vs type 1 unadjusted 
+RR.t1.t2.death <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.death, data = dat.t1.t2, family=poisson(link=log))
+rr.death <- rr.est(RR.t1.t2.death, "T1.T2.Death")
+
+# MACE Index type 2 vs type 1 unadjusted 
+RR.t1.t2.mace <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.mace, data = dat.t1.t2, family=poisson(link=log))
+rr.mace <- rr.est(RR.t1.t2.mace, "T1.T2.MACE")
+
+# Non-Fatal MI Index type 2 vs type 1 unadjusted 
+RR.t1.t2.nfmi <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.mi, data = dat.t1.t2, family=poisson(link=log))
+rr.nfmi <- rr.est(RR.t1.t2.nfmi, "T1.T2.NFMI")
+
+# CV Death type 2 vs type 1 unadjusted 
+RR.t1.t2.cv.death <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.cv.death, data = dat.t1.t2, family=poisson(link=log))
+rr.cvdeath <- rr.est(RR.t1.t2.cv.death, "T1.T2.CVDeath")
+
+# Fatal MI type 2 vs type 1 unadjusted 
+RR.t1.t2.fmi <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.fatalmi, data = dat.t1.t2, family=poisson(link=log))
+rr.fmi <- rr.est(RR.t1.t2.fmi, "T1.T2.FMI")
+
+# HF type 2 vs type 1 unadjusted 
+RR.t1.t2.hf <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.hf, data = dat.t1.t2, family=poisson(link=log))
+rr.hf <- rr.est(RR.t1.t2.hf, "T1.T2.HF")
+
+# Non-CV Death type 2 vs type 1 unadjusted 
+RR.t1.t2.noncv.death <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.non.cv.death , data = dat.t1.t2, family=poisson(link=log))
+rr.noncvdeath <- rr.est(RR.t1.t2.noncv.death, "T1.T2.NonCVDeath")
+
+unadj.rrt1.t2 <- rbind(rr.death,rr.mace,rr.nfmi,rr.cvdeath,rr.fmi,rr.hf,rr.noncvdeath)
+unadj.rrt1.t2 
+
+## Relative Risks type 2 versus type 1  adjusted 
+
+# DEATH Index type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.death <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.death + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.death <- rr.est(RR.t1.t2.death, "T1.T2.Death")
+
+# MACE Index type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.mace <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.mace + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.mace <- rr.est(RR.t1.t2.mace, "T1.T2.MACE")
+
+# Non-Fatal MI Index type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.nfmi <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.mi + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.nfmi <- rr.est(RR.t1.t2.nfmi, "T1.T2.NFMI")
+
+# CV Death type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.cv.death <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.cv.death + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.cvdeath <- rr.est(RR.t1.t2.cv.death, "T1.T2.CVDeath")
+
+# Fatal MI type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.fmi <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.fatalmi + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.fmi <- rr.est(RR.t1.t2.fmi, "T1.T2.FMI")
+
+# HF type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.hf <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.hf + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.hf <- rr.est(RR.t1.t2.hf, "T1.T2.HF")
+
+# Non-CV Death type 2 vs type 1 adjusted for age, sex, renal function and co-morbidities
+RR.t1.t2.noncv.death <- glm(dat.t1.t2$type2 ~ dat.t1.t2$five.year.non.cv.death + dat.t1.t2$Age + dat.t1.t2$Sex + dat.t1.t2$AdmissionHb + dat.t1.t2$Corrected.EGFR + dat.t1.t2$HTN + dat.t1.t2$HxSTROKE + dat.t1.t2$HxPVD + dat.t1.t2$DM + dat.t1.t2$known.cad +dat.t1.t2$Smoker +dat.t1.t2$cohort, data = dat.t1.t2, family=poisson(link=log))
+rr.noncvdeath <- rr.est(RR.t1.t2.noncv.death, "T1.T2.NonCVDeath")
+
+rrt1.t2 <- rbind(rr.death,rr.mace,rr.nfmi,rr.cvdeath,rr.fmi,rr.hf,rr.noncvdeath)
+rrt1.t2 
+
+#above repeated for all reported relative risks comparisons 
+
+##csHR calculation
+
+#---------------------------------------
+## All Cause Mortality TYPE 2 AND INJURY vs Type 1
+#---------------------------------------
+# unadjusted all cause death type 2/injury Model 1 
+all.type2injury.cox1 <- coxph(Surv(dat2$days.to.event.or.follow.up, dat2$all.death)~(dat2$type2.injury))
+summary(all.type2injury.cox1)
+
+# adjusted for age, sex type 2/injury
+all.type2injury.cox2 <- coxph(Surv(dat2$days.to.event.or.follow.up, dat2$all.death)~(dat2$type2.injury)+dat2$Age +dat2$Sex)
+summary(all.type2injury.cox2)
+
+# adjusted for age, sex and renal function
+all.type2injury.cox3 <- coxph(Surv(dat2$days.to.event.or.follow.up, dat2$all.death)~(dat2$type2.injury)+dat2$Age +dat2$Sex +dat2$Corrected.EGFR)
+summary(all.type2injury.cox3)
+
+# adjusted for age, sex, renal function and co-variates 
+all.type2injury.cox4 <- coxph(Surv(dat2$days.to.event.or.follow.up, dat2$all.death)~dat2$type2.injury+ pspline(dat2$Age) +dat2$Sex +dat2$AdmissionHb +pspline(dat2$Corrected.EGFR) +dat2$Smoker +dat2$DM +dat2$HTN +dat2$known.cad  +dat2$HxSTROKE +dat2$HxPVD +dat2$cohort)
+summary(all.type2injury.cox4)
+cox4 <- summary(all.type2injury.cox4)
+
+all.cox4 <- melt(exp(coef(all.type2injury.cox4)))
+all.cox4 <- cbind(all.cox4, exp(confint(all.type2injury.cox4)))
+
+all.cox4[2,] <- all.cox4[2,]^10
+all.cox4[4,] <- (1/all.cox4[4,])^10
+all.cox4[5,] <- (1/all.cox4[5,])^10
+
+write.csv(all.cox4, file="adjusted.cox.death.csv")
+
+##above repeated for all reported comparisons
+
+## Figure 1 - KM plots for all cause mortality by classification
+
+data=dat2
+
+d <- dat2[, c(7,8,2)]
+names(d) <- c("days", "event", "group")
+
+fit <- survfit(Surv(days,event)~group, data=d)
+diff <- survdiff(Surv(days,event)~group, data=d)
+
+risksets <- with(na.omit(d[, Cs(days, event, group)]), table(group, cut(days, seq(0, 2920, by=100) ) ))
+number.at.risk <- sapply(1:nrow(risksets), function(i) Reduce("-",  risksets[i,], init=rowSums(risksets)[i], accumulate=TRUE))
+number.at.risk <- data.frame(number.at.risk)
+names(number.at.risk) <- c("Type 1 MI", "Type 2 MI", "Myocardial Injury")
+number.at.risk
+
+number.at.risk = number.at.risk[1:6,]
+df_nums = melt(number.at.risk)
+df_nums$year = 1:6
+tbl.1 = ggplot(df_nums, aes(x = year, y = factor(variable,levels=rev(levels(variable))), colour = variable,label=value)) +
+        geom_text(size = 3.5) + theme(panel.grid.major = element_blank(), legend.position = "none") +      theme_bw() + 
+        theme(
+                plot.background = element_blank(), 
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                legend.position="none",
+                axis.line = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks=element_blank(),
+                axis.title.x = element_blank(),
+                axis.title.y = element_blank(),
+                plot.title = element_blank()
+        ) + scale_y_discrete(breaks=c("Type 1 MI", "Type 2 MI","Myocardial Injury"), labels=c("Type 1 MI","Type 2 MI", "Myocardial Injury"))
+
+tbl.1 <- tbl.1 + coord_fixed(ratio = 0.2)
+
+dev.new()
+pdf("Fig.1.atrisk.#pdf")
+print(tbl.1)
+dev.off()
+
+p.value <- round(1 - pchisq(diff$chisq, 1), digits=3)
+p.value <- ifelse(p.value < 0.001, "<0.001", paste("= ", p.value))
+
+t.Surv1 <- Surv(time=dat2$days.to.event.or.follow.up , event=dat2$all.death)
+t.survfit1 <- survfit(t.Surv1~classification, dat2)
+q.f <- plot(t.survfit1, mark.time=TRUE)
+
+t.survframe1 <-createSurvivalFrame(t.survfit1)
+
+t <- qplot_survival(t.survframe1,f.CI=F) +
+        ylab("Cumulative incidence of death from any cause (%) \n")+coord_cartesian(ylim = c(0,1))+scale_x_continuous(expand=c(0,0),limits=c(0,1825),breaks=seq(0,1825,365),labels=c(0, 1, 2, 3, 4, 5))+xlab("\n Time (Years)")+theme_bw()+
+        scale_y_continuous(expand=c(0,0),labels=percent,breaks=c(0,0.2,0.4,0.6,0.8,1))+#theme(legend.position="right") +
+        scale_color_manual("\n",labels = c("Myocardial Injury", "Type 2 MI", "Type 1 MI"), values=c("#619CFF","#00BA38","#F8766D")) +
+        theme(
+                axis.text.x = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.text.y = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.title.x = element_text(size=20,face="bold"),
+                axis.title.y = element_text(size=20,face="bold"),
+                plot.title = element_text(size=14,face="bold"))
+
+par(mar=c(1,1,1,1))
+
+t <- t +  annotate("text", x = 1400, y = 0.1, size=7, label = paste("P ", p.value, "by log-rank test", collapse="")) 
+t 
+
+dev.new()
+pdf("Fig.1.pdf", height=10, width=12)
+print(t)
+dev.off()
+
+#repeated for all figures 
+
+#===============
+#Sensitivity analysis: Type 2 or Injury CAD vs NO CAD: 
+#===============
+
+#restrict to those without inhospital death 
+landmark.dat.t2.injury <- subset(dat.t2.injury, days.to.event.or.follow.up>30) 
+
+#calculate 5 year MACE rate in those without inhospital death 
+landmark.dat.t2.injury$five.year.mace <- ifelse(landmark.dat.t2.injury$composite.mi.death==1&landmark.dat.t2.injury$days.to.mi.death.or.follow.up<=1826.25,1,0)
+
+#cox regression for CAD vs NO CAD
+all.type2injury.cox8 <- coxph(Surv(landmark.dat.t2.injury$days.to.mi.death.or.follow.up, landmark.dat.t2.injury$composite.mi.death)~(landmark.dat.t2.injury$known.cad) +landmark.dat.t2.injury$Age +landmark.dat.t2.injury$Sex +landmark.dat.t2.injury$AdmissionHb  +landmark.dat.t2.injury$Corrected.EGFR +landmark.dat.t2.injury$Smoker +landmark.dat.t2.injury$DM +landmark.dat.t2.injury$HTN +landmark.dat.t2.injury$HxSTROKE +landmark.dat.t2.injury$HxPVD +landmark.dat.t2.injury$cohort)
+summary(all.type2injury.cox8)
+plot(cox.zph(all.type2injury.cox8))
+cad.cox <- melt(exp(coef(all.type2injury.cox8)))
+cad.cox <- cbind(cad.cox, exp(confint(all.type2injury.cox8)))
+
+#to give HR per 10 fold increase etc
+cad.cox <- as.data.frame(cad.cox)
+
+cad.cox[2,] <- cad.cox[2,]^10
+cad.cox[4,] <- (1/cad.cox[4,])^10
+cad.cox[5,] <- (1/cad.cox[5,])^10
+
+### NUMBER AT RISK FOR FIGURE 3
+data=landmark.dat.t2.injury
+
+d <- landmark.dat.t2.injury[, c(21,84,85)]
+names(d) <- c("days", "event", "group")
+
+#?excluding events at day 0 - change to day 1
+d$days[d$days==0] <- 1
+
+fit <- survfit(Surv(days,event)~group, data=d)
+diff <- survdiff(Surv(days,event)~group, data=d)
+
+risksets <- with(na.omit(d[, Cs(days, event, group)]), table(group, cut(days, seq(0, 2920, by=365) ) ))
+number.at.risk <- sapply(1:nrow(risksets), function(i) Reduce("-",  risksets[i,], init=rowSums(risksets)[i], accumulate=TRUE))
+number.at.risk <- data.frame(number.at.risk)
+names(number.at.risk) <- c("No Known CAD", "Known CAD")
+number.at.risk
+
+number.at.risk = number.at.risk[1:6,]
+df_nums = melt(number.at.risk)
+df_nums$year = 1:6
+tbl.2 = ggplot(df_nums, aes(x = year, y = factor(variable,levels=levels(variable)), colour = variable,label=value)) +
+        geom_text(size = 4) + theme(panel.grid.major = element_blank(), legend.position = "none") +      theme_bw() + 
+        theme(
+                plot.background = element_blank(), 
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                legend.position="none",
+                axis.line = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks=element_blank(),
+                axis.title.x = element_blank(),
+                axis.title.y = element_blank(),
+                plot.title = element_blank()
+        )+
+        scale_color_manual("Groups\n",labels = c("Known CAD","No Known CAD"), breaks = c("Known CAD", "No Known CAD"), values=c("#00BA38","#F8766D")) 
+
+
+tbl.2 <- tbl.2 + coord_fixed(ratio = 0.2)
+tbl.2
+
+dev.new()
+pdf("Fig.3.atrisk.pdf")
+print(tbl.2)
+dev.off()
+
+
+#Table of discharge prescriptions
+
+vars <- c("DASA", "DClop", "DBblock", "DACE", "DStatin", 
+          "DNitrate", "DGTNspr", "DCCB", "DWarf")
+
+#restrict dataset to type 1 or CAD alone
+drugs <- subset(landmark.dat2, type1==1|known.cad==1)
+
+# CAD vs No CAD landmark population
+table <- CreateTableOne(vars=vars, strata=c("type2.injury"), data=drugs, includeNA = FALSE, test = TRUE, testApprox = chisq.test, argsApprox = list(correct = TRUE), testExact = fisher.test)
+
+table <- print(table, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+write.csv(table, file="cad.csv")
+
+#---------------------------------------
+## COMPETING RISK SURVIVAL ANALYSIS 
+#---------------------------------------
+library(cmprsk)
+library(timereg)
+
+dat4 <- dat2
+dat4 <- dat4[,c(1:9,11,21,84)]
+
+dat4$status <- ifelse(dat4$composite.mi.death==1,1,
+                      ifelse(dat4$non.cv.death==1,2,0))
+
+d <- cuminc(dat4$days.to.mi.death.or.follow.up, dat4$status, dat4$classification, cencode=0)
+
+#facet plot MACE on one plot 
+
+d1 <- data.frame (d$`1 1`$time, d$`1 1`$est)
+d1$classification <- 1
+names(d1) <- c("Time", "Event", "Classification")
+d2 <- data.frame (d$`2 1`$time, d$`2 1`$est)
+d2$classification <- 2
+names(d2) <- c("Time", "Event", "Classification")
+d3 <- data.frame (d$`3 1`$time, d$`3 1`$est)
+d3$classification <- 3
+names(d3) <- c("Time", "Event", "Classification")
+d4 <- data.frame (d$`1 2`$time, d$`1 2`$est)
+d4$classification <- 4
+names(d4) <- c("Time", "Event", "Classification")
+d5 <- data.frame (d$`2 2`$time, d$`2 2`$est)
+d5$classification <- 5
+names(d5) <- c("Time", "Event", "Classification")
+d6 <- data.frame (d$`3 2`$time, d$`3 2`$est)
+d6$classification <- 6
+names(d6) <- c("Time", "Event", "Classification")
+
+d.all <- rbind(d1,d2,d3,d4,d5,d6)
+d.all$Classification <- factor(d.all$Classification)
+d.all$group2 <- ifelse((d.all$Classification==1|d.all$Classification==2|d.all$Classification==3),"Major Adverse Cardiovascular Events","Non-Cardiovascular Death")
+
+#CumINC plot for all
+g <- ggplot() + 
+        geom_line(aes(Time, Event, colour=d.all$Classification, group=d.all$Classification, linetype=d.all$Classification),size=0.75, d.all) + 
+        scale_linetype_manual(name="Groups",values=c(1,1,1,8,8,8),labels=c("Type 1 - MACE","Type 2 - MACE", "Injury - MACE", "Type 1 - Non-CV Death", "Type 2 - Non-CV Death", "Injury - Non-CV Death"))+
+        ylab("Cumulative incidence of event (%) \n")+coord_cartesian(ylim = c(0,0.5))+scale_x_continuous(expand=c(0,0),limits=c(0,1825),breaks=seq(0,1825,365),labels=c(0, 1, 2, 3, 4, 5))+xlab("\n Time (Years)")+theme_bw()+
+        scale_y_continuous(expand=c(0,0),labels=percent,breaks=c(0,0.1,0.2,0.3,0.4,0.5))+theme(legend.position="none") +
+        scale_color_manual(name="Groups",labels=c("Type 1 - MACE","Type 2 - MACE", "Injury - MACE", "Type 1 - Non-CV Death", "Type 2 - Non-CV Death", "Injury - Non-CV Death"),values=c("#F8766D","#00BA38","#619CFF","#F8766D","#00BA38","#619CFF")) +
+        theme(
+                axis.text.x = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.text.y = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.title.x = element_text(size=20,face="bold"),
+                axis.title.y = element_text(size=20,face="bold"),
+                plot.title = element_text(size=14,face="bold"))
+
+
+par(mar=c(1,1,1,1))
+g
+
+g <- g + facet_grid(. ~ group2) 
+g <- g + theme(panel.spacing = unit(2, "lines"),strip.text.x = element_text(size = 24))
+g
+
+dev.new()
+pdf("cuminc.pdf",height=10,width=21)
+print(g)
+dev.off()
+
+#####For MACE vs NonCV Death in those who survive to 30 days
+#ftime, status, dis, cencode
+dat5 <- subset(dat4, days.to.mi.death.or.follow.up>30)
+
+e <- cuminc(dat5$days.to.mi.death.or.follow.up, dat5$status, dat5$classification, cencode=0)
+
+e1 <- data.frame (e$`1 1`$time, e$`1 1`$est)
+e1$classification <- 1
+names(e1) <- c("Time", "Event", "Classification")
+e2 <- data.frame (e$`2 1`$time, e$`2 1`$est)
+e2$classification <- 2
+names(e2) <- c("Time", "Event", "Classification")
+e3 <- data.frame (e$`3 1`$time, e$`3 1`$est)
+e3$classification <- 3
+names(e3) <- c("Time", "Event", "Classification")
+e4 <- data.frame (e$`1 2`$time, e$`1 2`$est)
+e4$classification <- 4
+names(e4) <- c("Time", "Event", "Classification")
+e5 <- data.frame (e$`2 2`$time, e$`2 2`$est)
+e5$classification <- 5
+names(e5) <- c("Time", "Event", "Classification")
+e6 <- data.frame (e$`3 2`$time, e$`3 2`$est)
+e6$classification <- 6
+names(e6) <- c("Time", "Event", "Classification")
+
+e.all <- rbind(e1,e2,e3,e4,e5,e6)
+
+e.all$Classification <- factor(e.all$Classification)
+
+h <- ggplot() + 
+        geom_line(aes(Time, Event, colour=e.all$Classification, group=e.all$Classification, linetype=e.all$Classification), size=0.75, e.all) +
+        scale_linetype_manual(name="Groups",values=c(1,1,1,8,8,8),labels=c("Type 1 - MACE","Type 2 - MACE", "Injury - MACE", "Type 1 - Non-CV Death", "Type 2 - Non-CV Death", "Injury - Non-CV Death"))+
+        ylab("Cumulative incidence (%) \n")+coord_cartesian(ylim = c(0,1))+scale_x_continuous(expand=c(0,0),limits=c(0,1825),breaks=seq(0,1825,365),labels=c(0, 1, 2, 3, 4, 5))+xlab("\n Time (Years)")+theme_bw()+
+        scale_y_continuous(expand=c(0,0),labels=percent,breaks=c(0,0.2,0.4,0.6,0.8,1))+theme(legend.position="none") +
+        scale_color_manual("Groups\n",labels=c("Type 1 - MACE","Type 2 - MACE", "Injury - MACE", "Type 1 - Non-CV Death", "Type 2 - Non-CV Death", "Injury - Non-CV Death"),values=c("#F8766D","#00BA38","#619CFF","#F8766D","#00BA38","#619CFF"))  +
+        theme(
+                axis.text.x = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.text.y = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.title.x = element_text(size=20,face="bold"),
+                axis.title.y = element_text(size=20,face="bold"),
+                plot.title = element_text(size=14,face="bold"))
+
+
+par(mar=c(1,1,1,1))
+h
+
+dev.new()
+pdf("mace.ncvd.pdf",height=10,width=12)
+print(h)
+dev.off()
+
+
+#cad in t2 injury survivors to 30d
+
+landmark.dat2$status <- ifelse(landmark.dat2$composite.mi.death==1,1,
+                               ifelse(landmark.dat2$non.cv.death==1,2,0))
+
+landmark.dat2$group <- ifelse(landmark.dat2$classification==1,3,
+                              ifelse(landmark.dat2$type2.injury==1&landmark.dat2$known.cad==1,1,2))
+
+f <- cuminc(landmark.dat2$days.to.mi.death.or.follow.up, landmark.dat2$status, landmark.dat2$group, cencode=0)
+
+f1 <- data.frame (f$`1 1`$time, f$`1 1`$est)
+f1$classification <- 1
+names(f1) <- c("Time", "Event", "Classification")
+f2 <- data.frame (f$`2 1`$time, f$`2 1`$est)
+f2$classification <- 2
+names(f2) <- c("Time", "Event", "Classification")
+f3 <- data.frame (f$`3 1`$time, f$`3 1`$est)
+f3$classification <- 3
+names(f3) <- c("Time", "Event", "Classification")
+f4 <- data.frame (f$`1 2`$time, f$`1 2`$est)
+f4$classification <- 4
+names(f4) <- c("Time", "Event", "Classification")
+f5 <- data.frame (f$`2 2`$time, f$`2 2`$est)
+f5$classification <- 5
+names(f5) <- c("Time", "Event", "Classification")
+f6 <- data.frame (f$`3 2`$time, f$`3 2`$est)
+f6$classification <- 6
+names(f6) <- c("Time", "Event", "Classification")
+
+f.all <- rbind(f1,f2,f3,f4,f5,f6)
+
+f.all$Classification <- factor(f.all$Classification)
+
+f.all$group2 <- ifelse((f.all$Classification==1|f.all$Classification==2|f.all$Classification==3),"Major Adverse Cardiovascular Events","Non-Cardiovascular Death")
+
+h <- ggplot() + 
+        geom_line(aes(Time, Event, colour=f.all$Classification, group=f.all$Classification, linetype=f.all$Classification), size=0.75, f.all) +
+        scale_linetype_manual(name="Groups\n",labels=c("Known CAD \nType 2 MI/Injury \n", "No Known CAD \nType 2 MI/Injury \n", "Type 1 MI","Known CAD \nType 2 MI/Injury \n", "No Known CAD \nType 2 MI/Injury \n", "Type 1 MI"),breaks=c(1,2,3,4,5,6),values=c(1,1,1,8,8,8))+
+        ylab("Cumulative incidence of event (%) \n")+coord_cartesian(ylim = c(0,0.5))+
+        scale_x_continuous(expand=c(0,0),limits=c(0,1825),breaks=seq(0,1825,365),labels=c(0, 1, 2, 3, 4, 5))+xlab("\n Time (Years)")+theme_bw()+
+        scale_y_continuous(expand=c(0,0),labels=percent,breaks=c(0,0.1,0.2,0.3,0.4,0.5))+theme(legend.position="none") +
+        scale_color_manual("Groups\n",labels = c("Known CAD \nType 2 MI/Injury \n", "No Known CAD \nType 2 MI/Injury \n", "Type 1 MI","Known CAD \nType 2 MI/Injury \n", "No Known CAD \nType 2 MI/Injury \n", "Type 1 MI"), breaks=c(1,2,3,4,5,6), values=c("#F8766D","#00BA38","orange","#F8766D","#00BA38","orange")) +
+        theme(
+                axis.text.x = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.text.y = element_text(size=20,hjust=.5,vjust=.8,face="bold",colour="black"),
+                axis.title.x = element_text(size=20,face="bold"),
+                axis.title.y = element_text(size=20,face="bold"),
+                plot.title = element_text(size=14,face="bold"))
+
+
+par(mar=c(1,1,1,1))
+
+h <- h + facet_grid(. ~ group2) 
+h <- h + theme(panel.spacing = unit(2, "lines"),strip.text.x = element_text(size = 24))
+h
+
+dev.new()
+pdf("cuminc.mace.ncvd.cad.30d.pdf",height=10,width=21)
+print(h)
+dev.off()
