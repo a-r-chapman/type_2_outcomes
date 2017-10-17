@@ -37,10 +37,9 @@ library(sandwich)
 ###================
 ### load functions
 ###================
-## qplot_survival function by K Middleton 
-## https://github.com/kmiddleton/rexamples/blob/master/qplot_survival.R
 
-# create KM curve
+## create KM curve
+## now available as part of the temporalHazards package 
 
 createSurvivalFrame <- function(f.survfit){ 
         # initialise frame variable
@@ -382,7 +381,6 @@ cox.zph(mod3.cox4)
 #adjusted for age, sex, renal function and co-variates [ FULLY ADJUSTED MODEL ]
 all.type2injury.cox4 <- coxph(Surv(dat2$days.to.mi.death.or.follow.up, dat2$composite.mi.death)~(dat2$type2.injury)+ pspline(dat2$Age) +dat2$Sex +dat2$AdmissionHb + pspline(dat2$Corrected.EGFR) +dat2$Smoker +dat2$DM +dat2$HTN +dat2$known.cad  +dat2$HxSTROKE +dat2$HxPVD +dat2$cohort)
 summary(all.type2injury.cox4)
-
 
 #---------------------------------------
 ## csHR Non-CV Death TYPE 2 AND INJURY vs Type 1
