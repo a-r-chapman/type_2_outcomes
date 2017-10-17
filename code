@@ -37,8 +37,10 @@ library(sandwich)
 ###================
 ### load functions
 ###================
+## qplot_survival function by K Middleton 
+## https://github.com/kmiddleton/rexamples/blob/master/qplot_survival.R
 
-# KM curve
+# create KM curve
 
 createSurvivalFrame <- function(f.survfit){ 
         # initialise frame variable
